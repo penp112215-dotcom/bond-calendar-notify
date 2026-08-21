@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # 北京时间每天 09:17；避开 GitHub Actions 整点高峰。
-    - cron: "17 1 * * *"
+    - cron: "17 2 * * *"
 
 permissions:
   contents: read
