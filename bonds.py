@@ -29,7 +29,7 @@ def build_session() -> requests.Session:
     )
     adapter = HTTPAdapter(max_retries=retry)
     session = requests.Session()
-    session.headers.update({"User-Agent": "bond-calendar-notify/1.0"})
+    session.headers.update({"User-Agent": "bond-calendar-notify/1.1"})
     session.mount("https://", adapter)
     return session
 
@@ -79,46 +79,58 @@ def get_today_date(now: datetime | None = None) -> str:
 
 
 def bonds_for_date(
-    bonds: list[dict[str, Any]], target_date: str
+    bonds: list[dict[str, Any]], field: str, target_date: str
 ) -> list[dict[str, Any]]:
-    """Select bonds whose public subscription date matches target_date."""
+    """Select bonds whose named date field matches ``target_date``."""
     selected = []
     for bond in bonds:
-        public_start_date = bond.get("PUBLIC_START_DATE")
-        if public_start_date and str(public_start_date).split()[0] == target_date:
+        value = bond.get(field)
+        if value and str(value).split()[0] == target_date:
             selected.append(bond)
     return selected
 
 
-def build_message(bonds: list[dict[str, Any]]) -> tuple[str, str]:
-    if not bonds:
-        return "📅 今日无可申购新债", "今天没有可申购的新债。"
+def format_bond(bond: dict[str, Any]) -> str:
+    return f"- {bond.get('SECURITY_NAME_ABBR', '-')}（{bond.get('SECURITY_CODE', '-')}）"
 
-    title = "📅 今日可申购新债"
-    content = "\n".join(
-        (
-            f"🔹 **{bond.get('SECURITY_NAME_ABBR', '-')}**"
-            f"（{bond.get('SECURITY_CODE', '-')}）"
-            f" - 申购日期: {bond.get('PUBLIC_START_DATE', '-')}"
-            f" - 信用评级: {bond.get('RATING', '-')}"
-        )
-        for bond in bonds
-    )
-    return title, content
+
+def build_daily_message(
+    subscription_bonds: list[dict[str, Any]],
+    result_bonds: list[dict[str, Any]],
+) -> tuple[str, str] | None:
+    """Build one non-duplicated Server Chan message for today's bond events."""
+    sections: list[str] = []
+
+    if subscription_bonds:
+        subscription_lines = ["## 今日可申购新债"]
+        subscription_lines.extend(format_bond(bond) for bond in subscription_bonds)
+        subscription_lines.append("请在交易时间内通过券商 App 完成申购。")
+        sections.append("\n".join(subscription_lines))
+
+    if result_bonds:
+        result_lines = ["## 今日公布中签结果"]
+        result_lines.extend(format_bond(bond) for bond in result_bonds)
+        result_lines.append("请打开券商 App 查询中签结果；如中签，请确保账户有足额认购资金。")
+        sections.append("\n".join(result_lines))
+
+    if not sections:
+        return None
+
+    return "📅 今日新债提醒", "\n\n".join(sections)
 
 
 def send_to_wechat(
-    bonds: list[dict[str, Any]],
+    title: str,
+    content: str,
     *,
     server_key: str | None = None,
     session: requests.Session | None = None,
 ) -> dict[str, Any]:
-    """Send a ServerChan notification and fail on rejected responses."""
+    """Send a Server Chan notification and fail on rejected responses."""
     key = server_key if server_key is not None else os.getenv("SERVERCHAN_API_KEY")
     if not key:
         raise RuntimeError("未设置 SERVERCHAN_API_KEY")
 
-    title, content = build_message(bonds)
     client = session or build_session()
     response = client.post(
         f"https://sctapi.ftqq.com/{key}.send",
@@ -163,7 +175,7 @@ def env_flag(name: str, default: bool = False) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="查询今日可申购新债并通过 Server 酱推送")
+    parser = argparse.ArgumentParser(description="推送今日可申购及公布中签结果的新债")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -173,22 +185,30 @@ def main(argv: list[str] | None = None) -> int:
 
     today = get_today_date()
     bonds = get_bond_calendar()
-    bonds_to_send = bonds_for_date(bonds, today)
-    print(f"北京时间 {today}，找到 {len(bonds_to_send)} 只可申购新债")
+    subscription_bonds = bonds_for_date(bonds, "PUBLIC_START_DATE", today)
+    result_bonds = bonds_for_date(bonds, "BOND_START_DATE", today)
+    message = build_daily_message(subscription_bonds, result_bonds)
+
+    print(
+        f"北京时间 {today}，找到 {len(subscription_bonds)} 只可申购新债，"
+        f"{len(result_bonds)} 只公布中签结果的新债"
+    )
 
     if args.dry_run:
-        for bond in bonds_to_send:
-            print(
-                f"- {bond.get('SECURITY_NAME_ABBR', '-')}"
-                f" ({bond.get('SECURITY_CODE', '-')})"
-            )
+        if message:
+            print(message[0])
+            print(message[1])
+        else:
+            print("今日无可申购或公布中签结果的新债")
         print("dry-run 完成，未发送微信通知")
         return 0
 
-    if bonds_to_send or env_flag("NOTIFY_WHEN_EMPTY"):
-        send_to_wechat(bonds_to_send)
+    if message:
+        send_to_wechat(*message)
+    elif env_flag("NOTIFY_WHEN_EMPTY"):
+        send_to_wechat("📅 今日新债提醒", "今天没有可申购或公布中签结果的新债。")
     else:
-        print("今日无可申购新债，按当前配置不发送通知")
+        print("今日没有需要推送的新债事件")
     return 0
 
 

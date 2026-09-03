@@ -1,29 +1,77 @@
 # bond-calendar-notify 📱
 
-每天北京时间 09:17 查询东方财富可转债日历，并通过 Server 酱推送当天可申购的新债。
+每天查询东方财富可转债日历，并通过 Server 酱推送两类提醒：
 
-## 工作方式
+1. **今日可申购新债**：提醒在交易时间内通过券商 App 申购。
+2. **今日公布中签结果**：提醒打开券商 App 查询中签结果；若中签，确保账户有足额认购资金。
 
-- `.github/workflows/push_daily_bonds.yml`：每日抓取、测试并推送，也支持手动运行。
-- `.github/workflows/keepalive.yml`：每月记录一次仓库活动，降低公开仓库的定时工作流因长期无活动而被 GitHub 自动停用的风险。
-- `bonds.py`：负责接口请求、日期筛选和 Server 酱推送。
+两个事件若同日出现，会合并为一条 Server 酱消息，避免重复打扰。项目不保存证券账户信息，也不会读取券商账户。
 
-默认在没有新债时不推送。将工作流中的 `NOTIFY_WHEN_EMPTY` 改为 `"true"` 后，可每天收到“今日无可申购新债”的确认消息。
+## 推荐部署：VPS 定时运行
 
-## 配置
+GitHub Actions 的 `schedule` 可能延迟，不适合盘前提醒。建议将本项目部署到 VPS，由 VPS 的 cron 在北京时间 09:10 的工作日执行。
 
-1. Fork 或复制本仓库。
-2. 在仓库的 `Settings → Secrets and variables → Actions` 中新增 Repository secret：
-   - 名称：`SERVERCHAN_API_KEY`
-   - 值：Server 酱 SendKey
-3. 打开 `Actions → push_bonds_daily`，点击 `Enable workflow`。
-4. 点击 `Run workflow` 手动运行一次，确认微信能收到通知。
+以下命令以 Ubuntu / Debian VPS 为例。先通过 SSH 登录 VPS：
 
-> GitHub 使用 UTC 执行 cron。`17 1 * * *` 对应北京时间每天 09:17，并避开 Actions 的整点拥堵时段。
+```bash
+sudo timedatectl set-timezone Asia/Shanghai
+sudo apt update
+sudo apt install -y git python3 python3-venv
+sudo mkdir -p /opt/bond-calendar-notify
+sudo chown "$USER":"$USER" /opt/bond-calendar-notify
+git clone https://github.com/penp112215-dotcom/bond-calendar-notify.git /opt/bond-calendar-notify
+cd /opt/bond-calendar-notify
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install --requirement requirements.txt
+```
+
+在项目目录创建只允许自己读取的环境变量文件：
+
+```bash
+cd /opt/bond-calendar-notify
+printf 'SERVERCHAN_API_KEY=你的Server酱SendKey\n' > .env
+chmod 600 .env
+mkdir -p logs
+```
+
+先做一次不发送通知的验证：
+
+```bash
+cd /opt/bond-calendar-notify
+.venv/bin/python -m unittest discover --start-directory tests --verbose
+.venv/bin/python bonds.py --dry-run
+```
+
+最后执行 `crontab -e`，加入下面一行。它会在每个工作日北京时间 09:10 运行，并将日志写入项目目录：
+
+```cron
+10 9 * * 1-5 cd /opt/bond-calendar-notify && set -a && . ./.env && set +a && .venv/bin/python bonds.py >> logs/cron.log 2>&1
+```
+
+保存后用下面命令确认：
+
+```bash
+crontab -l
+tail -f /opt/bond-calendar-notify/logs/cron.log
+```
+
+> VPS 启用 cron 后，请在 GitHub 仓库的 `Actions` 页面禁用 `push_bonds_daily` 工作流，避免 GitHub 和 VPS 产生重复通知。
+
+## 数据字段与提醒日期
+
+- `PUBLIC_START_DATE`：可申购日期。
+- `BOND_START_DATE`：东方财富日历中的认购开始日期，通常对应可转债中签结果公布和认购资金准备的 T+2 日。
+
+项目直接使用这两个日期字段，不自行推算交易日，因此可避免周末和法定休市造成的日期偏差。
+
+## GitHub Actions（仅作备用）
+
+`.github/workflows/push_daily_bonds.yml` 仍可手动运行或作为备用，但不建议依赖其准点性。配置 `SERVERCHAN_API_KEY` 为 Repository secret 后，可在 `Actions → push_bonds_daily → Run workflow` 手动测试。
 
 ## 本地验证
 
-需要 Python 3.9 或更高版本（GitHub Actions 使用 Python 3.13）：
+需要 Python 3.9 或更高版本：
 
 ```bash
 python -m pip install --requirement requirements.txt
@@ -31,22 +79,17 @@ python -m unittest discover --start-directory tests --verbose
 python bonds.py --dry-run
 ```
 
-`--dry-run` 会调用真实数据源并显示筛选结果，但不会发送微信通知，也不需要配置 SendKey。
+`--dry-run` 会调用真实数据源并显示当天两类事件，但不会发送 Server 酱通知，也不需要配置 SendKey。
 
-## 可靠性设计
+默认没有任何事件时不推送。需要每日收到确认消息时，设置环境变量：
 
-- 东方财富 GET 请求最多重试 3 次，并设置连接与读取超时。
-- HTTP 错误、异常响应结构、Server 酱业务错误都会让任务失败，不再出现“没有实际推送但 Actions 显示成功”。
-- 使用 `Asia/Shanghai` 时区判断申购日期。
-- 每次运行先执行单元测试；任务最长运行 10 分钟。
-- 日常推送只有仓库只读权限；只有独立的 keepalive 工作流具有内容写权限。
-- 相同工作流不会并发执行，避免手动运行与定时运行重叠造成重复推送。
+```bash
+NOTIFY_WHEN_EMPTY=true
+```
 
 ## 故障排查
 
-- **没有产生新的运行记录**：先确认工作流是否显示 `disabled_inactivity`，如是则点击 `Enable workflow`。
-- **Validate configuration 失败**：检查 `SERVERCHAN_API_KEY` 是否存在且名称完全一致。
-- **Push today's bonds 失败**：展开对应步骤查看东方财富或 Server 酱的错误信息。
-- **希望每天都收到确认**：把 `NOTIFY_WHEN_EMPTY` 设置为 `"true"`。
-
-如果任务必须具备严格的准点和可用性保障，建议将定时调度迁移到云函数或其他专用定时服务；GitHub Actions 的计划任务仍可能因平台负载而延迟。
+- **没有收到提醒**：先检查 `logs/cron.log`，再确认 `.env` 中的 `SERVERCHAN_API_KEY` 正确。
+- **脚本找不到模块**：确认 cron 使用的是 `.venv/bin/python`，而不是系统 Python。
+- **部署后重复提醒**：禁用 GitHub 上的 `push_bonds_daily` 定时工作流。
+- **数据源或 Server 酱失败**：脚本会以非零状态退出，错误会记录在 `logs/cron.log`。

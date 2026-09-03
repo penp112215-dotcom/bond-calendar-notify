@@ -68,13 +68,32 @@ class BondCalendarTests(unittest.TestCase):
         calendar = [
             {"SECURITY_CODE": "1", "PUBLIC_START_DATE": "2026-08-20 00:00:00"},
             {"SECURITY_CODE": "2", "PUBLIC_START_DATE": "2026-08-20"},
-            {"SECURITY_CODE": "3", "PUBLIC_START_DATE": "2026-08-21 00:00:00"},
+            {"SECURITY_CODE": "3", "BOND_START_DATE": "2026-08-20 00:00:00"},
             {"SECURITY_CODE": "4"},
         ]
 
-        selected = bonds.bonds_for_date(calendar, "2026-08-20")
+        selected = bonds.bonds_for_date(calendar, "PUBLIC_START_DATE", "2026-08-20")
+        result_selected = bonds.bonds_for_date(calendar, "BOND_START_DATE", "2026-08-20")
 
         self.assertEqual([bond["SECURITY_CODE"] for bond in selected], ["1", "2"])
+        self.assertEqual([bond["SECURITY_CODE"] for bond in result_selected], ["3"])
+
+    def test_build_daily_message_includes_both_event_types(self):
+        message = bonds.build_daily_message(
+            [{"SECURITY_NAME_ABBR": "甲转债", "SECURITY_CODE": "111111"}],
+            [{"SECURITY_NAME_ABBR": "乙转债", "SECURITY_CODE": "222222"}],
+        )
+
+        self.assertIsNotNone(message)
+        title, content = message
+        self.assertEqual(title, "📅 今日新债提醒")
+        self.assertIn("今日可申购新债", content)
+        self.assertIn("甲转债（111111）", content)
+        self.assertIn("今日公布中签结果", content)
+        self.assertIn("乙转债（222222）", content)
+
+    def test_build_daily_message_returns_none_without_events(self):
+        self.assertIsNone(bonds.build_daily_message([], []))
 
     def test_get_today_date_converts_to_beijing_time(self):
         utc_time = datetime(2026, 8, 19, 16, 30, tzinfo=timezone.utc)
@@ -87,23 +106,24 @@ class BondCalendarTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(RuntimeError, "invalid key"):
-            bonds.send_to_wechat([], server_key="secret", session=session)
+            bonds.send_to_wechat("title", "content", server_key="secret", session=session)
 
         url, request_options = session.post_call
         self.assertEqual(url, "https://sctapi.ftqq.com/secret.send")
         self.assertEqual(request_options["timeout"], bonds.REQUEST_TIMEOUT)
+        self.assertEqual(request_options["data"], {"title": "title", "desp": "content"})
 
     def test_send_to_wechat_hides_key_on_http_error(self):
         session = FakeSession(post_response=FakeResponse({}, status_code=500))
 
         with self.assertRaisesRegex(RuntimeError, r"status=500") as error:
-            bonds.send_to_wechat([], server_key="very-secret", session=session)
+            bonds.send_to_wechat("title", "content", server_key="very-secret", session=session)
 
         self.assertNotIn("very-secret", str(error.exception))
 
     def test_send_to_wechat_requires_server_key(self):
         with self.assertRaisesRegex(RuntimeError, "SERVERCHAN_API_KEY"):
-            bonds.send_to_wechat([], server_key="")
+            bonds.send_to_wechat("title", "content", server_key="")
 
     def test_env_flag_rejects_invalid_value(self):
         with mock.patch.dict("os.environ", {"NOTIFY_WHEN_EMPTY": "maybe"}):
